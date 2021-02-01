@@ -1,0 +1,121 @@
+---
+
+ - name: Access instance with TAGS
+   hosts: localhost
+   connection: local
+   gather_facts: false
+   vars:
+    node_apps_location: /usr/local/opt/node
+    instance_type: t2.micro
+    image: ami-2051294a
+    security_group: app_sec_group
+    keypair: ssh-key-pair
+    region: us-east-1
+    nginx_path: /etc/nginx
+    nginx_sites: "{{ nginx_path }}/sites-available"
+
+   tasks:
+       - name: Locate instance id with tags
+         ec2_instance_info:
+           region: us-east-2
+           filters:
+             "tag:Env": server-1
+         register: ec2_info
+         tags:
+          - always
+
+       - name: Start ec2 instance
+         ec2:
+           instance_ids:  "{{ instance_id }}"
+           region: "{{ region }}"
+           key_name: "{{ keypair }}"
+           group: "{{ security_group }}"
+           instance_type: "{{ instance_type }}"
+           image: "{{ image }}"
+           state: running
+           wait: yes
+           assign_public_ip: yes
+           wait_timeout: 500
+           count: 1
+         loop: "{{ ec2_info.instances }}"
+         loop_control:
+           label: "{{ item.instance_id }}"
+         tags:
+          - start
+          - never
+        
+       - name: Wait for SSH to come up
+         local_action:
+          module: wait_for
+          host: "{{ item.public_ip }}"
+          port: 22
+          delay: 10
+          timeout: 120
+         loop: "{{ ec2.instances }}"
+
+
+       - name: Terminate ec2 instance
+         ec2:
+           key_name: "{{ keypair }}"
+           region: us-east-2
+           state: absent
+           wait: yes
+           instance_ids: '{{ ec2.instance_ids }}'
+         tags:
+          - terminate
+          - never
+       
+       - name: Update apt
+         apt: update_cache=yes
+
+       - name: Ensure Node.js app folder exists.
+         file: "path={{ node_apps_location }} state=directory"
+
+       - name: Copy example Node.js app to server. 
+         copy: "src=app dest={{ node_apps_location }}"
+
+       - name: Install app dependencies defined in package.json. 
+         npm: path={{ node_apps_location }}/app
+
+       - name: Check list of running Node.js apps. 
+         command: forever list
+         register: forever_list
+         changed_when: false
+
+       - name: Start example Node.js app.
+         command: "forever start {{ node_apps_location }}/app/app.js"
+         when: "forever_list.stdout.find(node_apps_location + \
+                '/app/app.js')==-1"
+        
+       - name: Install nginx
+         apt:
+          name=nginx
+          state=latest
+        
+       - name: Delete default nginx vhost
+         file:
+          path={{ nginx_sites }}/default
+          state=absent
+
+       - name: Delete default nginx vhost symlink
+         file: path=/etc/nginx/sites-enabled/default state=absent
+
+       - name: Setup nginx vhost
+         template:
+          src=nginx.tpl
+          dest={{ nginx_sites }}/{{ conf_file }}.conf
+
+       - name: Create symlink nginx vhost
+         file:
+          src={{ nginx_sites }}/{{ conf_file }}.conf
+          dest=/etc/nginx/sites-enabled/{{ conf_file }}.conf
+          state=link
+         notify: restart nginx
+
+   handlers:
+    - name: restart nginx
+      service:
+        name=nginx
+        state=restarted
+
+
